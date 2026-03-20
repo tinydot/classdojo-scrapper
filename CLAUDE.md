@@ -37,7 +37,7 @@ posts (
 attachments (
   id INT PK AUTOINCREMENT, post_id TEXT FK,
   filename TEXT, mimetype TEXT, url TEXT, att_type TEXT,
-  ocr_text TEXT, ocr_method TEXT, downloaded_at TEXT
+  local_path TEXT, ocr_text TEXT, ocr_method TEXT, downloaded_at TEXT
 )
 ```
 
@@ -61,7 +61,12 @@ These are fully implemented and only need the comments removed to activate.
 ## Dependencies
 
 Python: `playwright anthropic python-dotenv requests pdfplumber pytesseract Pillow pdf2image`
-System: `tesseract-ocr` (`apt install tesseract-ocr`)
+
+System — Tesseract OCR:
+- **Windows**: `winget install UB-Mannheim.TesseractOCR` (or `choco install tesseract`)
+  - If not on PATH, set `pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"`
+- **Linux**: `sudo apt install tesseract-ocr`
+- **macOS**: `brew install tesseract`
 
 ## Development conventions
 

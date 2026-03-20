@@ -50,14 +50,37 @@ For each attachment the script tries these steps in order, stopping at the first
 # 1. Clone the repo
 git clone <your-repo> && cd classdojo-digest
 
-# 2. Install system dependency (Debian/Ubuntu)
-sudo apt install tesseract-ocr
-
-# 3. Install Python dependencies
+# 2. Install Python dependencies
 pip install playwright anthropic python-dotenv requests pdfplumber pytesseract Pillow pdf2image
 
-# 4. Install the Chromium browser for Playwright
+# 3. Install the Chromium browser for Playwright
 playwright install chromium
+```
+
+**Step 4 — Install Tesseract OCR** (required for scanned PDFs and images):
+
+**Windows**
+```powershell
+# Option A — winget (Windows 10/11 built-in)
+winget install UB-Mannheim.TesseractOCR
+
+# Option B — Chocolatey
+choco install tesseract
+```
+After installing, add Tesseract to your PATH (the installer offers this as a checkbox) or set it explicitly in your script:
+```python
+import pytesseract
+pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+```
+
+**Linux (Debian/Ubuntu)**
+```bash
+sudo apt install tesseract-ocr
+```
+
+**macOS**
+```bash
+brew install tesseract
 ```
 
 ## Configuration
@@ -78,6 +101,7 @@ cp .env.example .env
 | `SMTP_PORT` | — | Default: `587` |
 | `EMAIL_FROM` | — | Default: same as `SMTP_USER` |
 | `DB_PATH` | — | Path to SQLite file. Default: `classdojo_seen.db` in current dir |
+| `ATTACHMENTS_DIR` | — | Folder for downloaded files. Default: `./attachments` |
 | `HEADLESS` | — | `true` (default) or `false` to watch the browser |
 
 ### Gmail App Password setup
@@ -123,6 +147,8 @@ Each run saves all new posts with:
 - Full message body
 - Author, school, timestamp
 - Attachment download URLs (signed CloudFront URLs — valid for ~24 hours from when the feed was fetched)
+- A local copy of each attachment saved to `ATTACHMENTS_DIR/<post_id>/<filename>`
+- The local file path stored in the `local_path` column
 - Extracted text from each attachment (`ocr_text` column) and which method extracted it (`ocr_method`)
 
 Query example:
@@ -148,11 +174,14 @@ The AI summary and email sending are currently **disabled** in `main()`. Uncomme
 
 ```
 classdojo-digest/
-├── classdojo_digest.py   # main script
-├── .env                  # your credentials (never commit this)
-├── .env.example          # template
-├── classdojo_seen.db     # auto-created on first run
-└── classdojo.log         # if you redirect cron output here
+├── classdojo_digest.py        # main script
+├── .env                       # your credentials (never commit this)
+├── .env.example               # template
+├── classdojo_seen.db          # auto-created on first run
+├── attachments/               # downloaded attachment files (auto-created)
+│   └── <post_id>/
+│       └── filename.pdf
+└── classdojo.log              # if you redirect cron output here
 ```
 
 ## Troubleshooting
