@@ -453,15 +453,16 @@ def extract_attachment_text(att: dict) -> tuple[str, str]:
             method = "tesseract"
             log.info(f"  ✓ tesseract extracted {len(text)} chars from {filename}")
 
-    # Step 3: Claude vision fallback
-    if not text and mimetype in ("application/pdf",) or (
-        not text and mimetype.startswith("image/")
-    ):
-        log.info(f"  No text found locally, using Claude vision fallback for {filename}…")
-        text = _ocr_claude_vision(data, mimetype, filename)
-        if text:
-            method = "claude-vision"
-            log.info(f"  ✓ Claude vision extracted {len(text)} chars from {filename}")
+    # Step 3: Claude vision fallback (disabled)
+    # Uncomment to enable Claude vision as a final fallback for files where
+    # pdfplumber and tesseract both produce no text (e.g. scanned/image-only PDFs).
+    #
+    # if not text and (mimetype == "application/pdf" or mimetype.startswith("image/")):
+    #     log.info(f"  No text found locally, using Claude vision fallback for {filename}…")
+    #     text = _ocr_claude_vision(data, mimetype, filename)
+    #     if text:
+    #         method = "claude-vision"
+    #         log.info(f"  ✓ Claude vision extracted {len(text)} chars from {filename}")
 
     return text, method
 

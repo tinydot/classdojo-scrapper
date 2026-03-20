@@ -1,6 +1,6 @@
 # ClassDojo Daily Digest
 
-A Python script that logs into ClassDojo, intercepts the story feed API, summarises new posts with Claude AI, and emails you a daily digest — with zero DOM scraping.
+A Python script that logs into ClassDojo, intercepts the story feed API, downloads and OCR-extracts attachment content, summarises new posts with Claude AI, and emails you a daily digest — with zero DOM scraping.
 
 ## How it works
 
@@ -10,12 +10,31 @@ cron (daily)
         └── Logs in with email + password
             └── Intercepts storyFeed API JSON response
                 └── Filters out already-seen posts (SQLite)
-                    └── Summarises new posts via Claude API
-                        └── Sends HTML email digest
-                            └── Marks posts as seen in SQLite
+                    └── Downloads attachments (PDFs, images)
+                        └── Extracts text via OCR pipeline
+                            └── Saves full post + attachment data to SQLite
+                                └── (Optional) Summarises via Claude API + sends email
 ```
 
 Instead of scraping HTML elements (which break whenever ClassDojo updates their frontend), the script listens for the internal API call that ClassDojo's own app makes — `storyFeed?withStudentCommentsAndLikes=true` — and parses the structured JSON directly. This makes it robust to UI changes.
+
+## Database
+
+All data is persisted in `classdojo_seen.db` (SQLite). Three tables are created automatically:
+
+| Table | Purpose |
+|---|---|
+| `seen_posts` | Deduplication — `post_id` + `seen_at` |
+| `posts` | Full post metadata — author, school, body, timestamps, type, counts |
+| `attachments` | Per-attachment rows — filename, mimetype, download URL, extracted OCR text, OCR method used |
+
+## OCR pipeline
+
+For each attachment the script tries these steps in order, stopping at the first that produces text:
+
+1. **pdfplumber** — fast text extraction for text-based PDFs (no external tools needed)
+2. **pytesseract + pdf2image** — rasterises pages and runs Tesseract OCR (for scanned PDFs or images)
+3. **Claude vision API** — disabled by default; uncomment in `extract_attachment_text()` to enable as a final fallback
 
 ## Requirements
 
@@ -23,23 +42,25 @@ Instead of scraping HTML elements (which break whenever ClassDojo updates their 
 - A ClassDojo parent account (email + password login)
 - An [Anthropic API key](https://console.anthropic.com/)
 - A Gmail account (or any SMTP provider) for sending the digest
+- `tesseract-ocr` system package (for image/scanned-PDF OCR)
 
 ## Installation
 
 ```bash
-# 1. Clone or download the script
+# 1. Clone the repo
 git clone <your-repo> && cd classdojo-digest
 
-# 2. Install Python dependencies
-pip install playwright anthropic python-dotenv
+# 2. Install system dependency (Debian/Ubuntu)
+sudo apt install tesseract-ocr
 
-# 3. Install the Chromium browser for Playwright
+# 3. Install Python dependencies
+pip install playwright anthropic python-dotenv requests pdfplumber pytesseract Pillow pdf2image
+
+# 4. Install the Chromium browser for Playwright
 playwright install chromium
 ```
 
 ## Configuration
-
-Copy the example env file and fill in your values:
 
 ```bash
 cp .env.example .env
@@ -95,15 +116,33 @@ Add this line (update the path):
 0 7 * * * /usr/bin/python3 /path/to/classdojo_digest.py >> /path/to/classdojo.log 2>&1
 ```
 
-## What's in the email
+## What's saved to the database
+
+Each run saves all new posts with:
+
+- Full message body
+- Author, school, timestamp
+- Attachment download URLs (signed CloudFront URLs — valid for ~24 hours from when the feed was fetched)
+- Extracted text from each attachment (`ocr_text` column) and which method extracted it (`ocr_method`)
+
+Query example:
+
+```sql
+SELECT p.author, p.time_str, p.body, a.filename, a.ocr_text
+FROM posts p
+LEFT JOIN attachments a ON a.post_id = p.post_id
+ORDER BY p.time_raw DESC;
+```
+
+## What's in the email (when enabled)
 
 Each digest includes:
 
-- **AI Summary** — Claude reads all new posts and produces a concise, parent-friendly summary with headlines and any action items called out
+- **AI Summary** — Claude reads all new posts (including OCR-extracted attachment text) and produces a concise, parent-friendly summary with headlines and any action items called out
 - **Raw posts** — each post shown with teacher name, school, timestamp, full message body, attachment links (PDF memos etc.), and like/comment counts
 - **Direct link** — opens ClassDojo home in one tap
 
-Posts are deduplicated using SQLite — you will only ever receive a post once, no matter how many times the script runs.
+The AI summary and email sending are currently **disabled** in `main()`. Uncomment those lines to re-enable.
 
 ## File structure
 
@@ -124,14 +163,20 @@ Run with `HEADLESS=false` to watch the browser. The storyFeed API call should fi
 **Login fails / times out**
 ClassDojo may show a CAPTCHA or 2FA prompt on new devices. Run with `HEADLESS=false` once to complete any one-time verification, then the session cookies should work for subsequent headless runs.
 
+**Attachment download fails**
+The signed CloudFront URLs in the feed expire after a few hours. The script must be run while the session is active for downloads to succeed. If you are re-running against old captured data, the URLs may already be expired.
+
+**No OCR text extracted from a PDF**
+The PDF is likely a scanned document where pdfplumber finds no embedded text. Ensure `tesseract-ocr`, `pytesseract`, and `pdf2image` are installed. For complex layouts, consider enabling the Claude vision fallback in `extract_attachment_text()`.
+
 **Email not sending**
 Check that you are using a Gmail App Password, not your regular Google account password. Regular passwords are blocked by Gmail for SMTP.
 
 **Duplicate posts appearing**
-The SQLite database (`classdojo_seen.db`) tracks seen post IDs. Do not delete this file between runs. If you need to reset and re-receive all posts, delete the database and run the script again.
+The SQLite database (`classdojo_seen.db`) tracks seen post IDs. Do not delete this file between runs. If you need to reset and re-receive all posts, delete the database and run again.
 
 ## Notes
 
-- The storyFeed API response includes signed CloudFront URLs for attachments (PDFs, images). These URLs expire after some hours, so attachment links in older emails may stop working.
-- This script uses the Claude Sonnet model via the Anthropic API. Costs are minimal — a typical digest with a few posts uses well under $0.01 of API credit.
-- ClassDojo's internal API is undocumented and may change without notice. If the script stops working after a ClassDojo update, the most likely fix is updating the login URL or waiting for the feed API URL to be identified again via browser DevTools.
+- The storyFeed API response includes signed CloudFront URLs for attachments (PDFs, images). These URLs expire after some hours.
+- AI summary and email sending are disabled by default. The script runs as a scraper/archiver.
+- ClassDojo's internal API is undocumented and may change without notice. If the script stops working after a ClassDojo update, the most likely fix is updating the login URL or identifying the new feed API URL via browser DevTools.
