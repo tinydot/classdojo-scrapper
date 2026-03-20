@@ -30,6 +30,7 @@ import sqlite3
 import smtplib
 import logging
 import tempfile
+import mimetypes
 import requests
 from datetime import datetime, timezone
 from email.mime.multipart import MIMEMultipart
@@ -171,9 +172,11 @@ def parse_feed(data: dict) -> list[dict]:
         attachments = []
         for att in contents.get("attachments", []):
             meta = att.get("metadata", {})
+            filename = meta.get("filename", "attachment")
+            mimetype = meta.get("mimetype", "") or mimetypes.guess_type(filename)[0] or ""
             attachments.append({
-                "filename": meta.get("filename", "attachment"),
-                "mimetype": meta.get("mimetype", ""),
+                "filename": filename,
+                "mimetype": mimetype,
                 "url":      att.get("path", ""),
                 "type":     att.get("type", ""),
             })
