@@ -50,14 +50,37 @@ For each attachment the script tries these steps in order, stopping at the first
 # 1. Clone the repo
 git clone <your-repo> && cd classdojo-digest
 
-# 2. Install system dependency (Debian/Ubuntu)
-sudo apt install tesseract-ocr
-
-# 3. Install Python dependencies
+# 2. Install Python dependencies
 pip install playwright anthropic python-dotenv requests pdfplumber pytesseract Pillow pdf2image
 
-# 4. Install the Chromium browser for Playwright
+# 3. Install the Chromium browser for Playwright
 playwright install chromium
+```
+
+**Step 4 — Install Tesseract OCR** (required for scanned PDFs and images):
+
+**Windows**
+```powershell
+# Option A — winget (Windows 10/11 built-in)
+winget install UB-Mannheim.TesseractOCR
+
+# Option B — Chocolatey
+choco install tesseract
+```
+After installing, add Tesseract to your PATH (the installer offers this as a checkbox) or set it explicitly in your script:
+```python
+import pytesseract
+pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+```
+
+**Linux (Debian/Ubuntu)**
+```bash
+sudo apt install tesseract-ocr
+```
+
+**macOS**
+```bash
+brew install tesseract
 ```
 
 ## Configuration
