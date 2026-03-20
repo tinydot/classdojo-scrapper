@@ -5,11 +5,12 @@ ClassDojo Daily Digest
 - Intercepts the storyFeed API JSON response (no DOM scraping)
 - Summarises new posts with Claude API
 - Sends email digest
-- Tracks seen posts in SQLite
+- Tracks seen posts in SQLite (with full post data, attachments, and OCR text)
 
 Setup:
-  pip install playwright anthropic python-dotenv
+  pip install playwright anthropic python-dotenv requests pdfplumber pytesseract Pillow pdf2image
   playwright install chromium
+  # Also install tesseract OCR: apt install tesseract-ocr
 
 Config:
   Copy .env.example to .env and fill in your values.
@@ -20,10 +21,14 @@ Cron (daily at 7am):
 
 import os
 import re
+import io
 import json
+import base64
 import sqlite3
 import smtplib
 import logging
+import tempfile
+import requests
 from datetime import datetime, timezone
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -67,6 +72,35 @@ def get_db() -> sqlite3.Connection:
             seen_at  TEXT NOT NULL
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS posts (
+            post_id       TEXT PRIMARY KEY,
+            seen_at       TEXT NOT NULL,
+            author        TEXT,
+            school        TEXT,
+            time_raw      TEXT,
+            time_str      TEXT,
+            body          TEXT,
+            type          TEXT,
+            like_count    INTEGER DEFAULT 0,
+            comment_count INTEGER DEFAULT 0,
+            avatar_url    TEXT
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS attachments (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            post_id       TEXT NOT NULL,
+            filename      TEXT,
+            mimetype      TEXT,
+            url           TEXT,
+            att_type      TEXT,
+            ocr_text      TEXT,
+            ocr_method    TEXT,
+            downloaded_at TEXT,
+            FOREIGN KEY (post_id) REFERENCES posts(post_id)
+        )
+    """)
     conn.commit()
     return conn
 
@@ -90,14 +124,35 @@ def mark_seen(posts: list[dict], conn: sqlite3.Connection) -> None:
     )
     conn.commit()
 
+
+def save_posts(posts: list[dict], conn: sqlite3.Connection) -> None:
+    """Save full post data and processed attachments to DB."""
+    now = datetime.now(timezone.utc).isoformat()
+    for p in posts:
+        conn.execute("""
+            INSERT OR REPLACE INTO posts
+              (post_id, seen_at, author, school, time_raw, time_str, body, type,
+               like_count, comment_count, avatar_url)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            p["id"], now, p["author"], p["school"], p["time_raw"], p["time"],
+            p["body"], p["type"], p["like_count"], p["comment_count"], p["avatar_url"],
+        ))
+        for att in p.get("attachments", []):
+            conn.execute("""
+                INSERT INTO attachments
+                  (post_id, filename, mimetype, url, att_type, ocr_text, ocr_method, downloaded_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                p["id"], att["filename"], att["mimetype"], att["url"], att["type"],
+                att.get("ocr_text"), att.get("ocr_method"), now,
+            ))
+    conn.commit()
+
 # ── Feed parser ───────────────────────────────────────────────────────────────
 def parse_feed(data: dict) -> list[dict]:
     """
     Parse _items from the storyFeed API response into clean post dicts.
-
-    Sample item shape (from the API):
-      _id, time, senderName, headerText, headerSubtext, headerAvatarURL,
-      type, contents.body, contents.attachments[], likeCount, commentCount
     """
     posts = []
     for item in data.get("_items", []):
@@ -232,6 +287,203 @@ def fetch_feed(email: str, password: str) -> list[dict]:
 
     return parse_feed(captured["data"])
 
+# ── OCR / attachment extraction ───────────────────────────────────────────────
+def _download_attachment(url: str) -> bytes | None:
+    """Download attachment bytes from a signed URL."""
+    try:
+        resp = requests.get(url, timeout=30)
+        resp.raise_for_status()
+        return resp.content
+    except Exception as exc:
+        log.warning(f"Failed to download attachment: {exc}")
+        return None
+
+
+def _ocr_pdf_pdfplumber(data: bytes) -> str:
+    """Extract text from a PDF using pdfplumber (works for text-based PDFs)."""
+    try:
+        import pdfplumber
+        with pdfplumber.open(io.BytesIO(data)) as pdf:
+            texts = []
+            for page in pdf.pages:
+                t = page.extract_text()
+                if t:
+                    texts.append(t.strip())
+        return "\n\n".join(texts)
+    except ImportError:
+        log.warning("pdfplumber not installed; skipping PDF text extraction.")
+        return ""
+    except Exception as exc:
+        log.warning(f"pdfplumber extraction failed: {exc}")
+        return ""
+
+
+def _ocr_image_tesseract(data: bytes, mimetype: str = "image/png") -> str:
+    """OCR an image using pytesseract."""
+    try:
+        import pytesseract
+        from PIL import Image
+        img = Image.open(io.BytesIO(data))
+        return pytesseract.image_to_string(img).strip()
+    except ImportError:
+        log.warning("pytesseract/Pillow not installed; skipping image OCR.")
+        return ""
+    except Exception as exc:
+        log.warning(f"tesseract OCR failed: {exc}")
+        return ""
+
+
+def _ocr_pdf_via_images_tesseract(data: bytes) -> str:
+    """Convert PDF pages to images then OCR with tesseract (for scanned PDFs)."""
+    try:
+        from pdf2image import convert_from_bytes
+        import pytesseract
+        pages = convert_from_bytes(data, dpi=200)
+        texts = [pytesseract.image_to_string(p).strip() for p in pages]
+        return "\n\n".join(t for t in texts if t)
+    except ImportError:
+        log.warning("pdf2image/pytesseract not installed; skipping scanned PDF OCR.")
+        return ""
+    except Exception as exc:
+        log.warning(f"pdf2image OCR failed: {exc}")
+        return ""
+
+
+def _ocr_claude_vision(data: bytes, mimetype: str, filename: str) -> str:
+    """Send file to Claude vision API for text extraction (fallback)."""
+    try:
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+
+        # Claude vision supports image types; for PDFs encode as base64 document
+        if mimetype == "application/pdf":
+            encoded = base64.standard_b64encode(data).decode("utf-8")
+            content = [
+                {
+                    "type": "document",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "application/pdf",
+                        "data": encoded,
+                    },
+                },
+                {
+                    "type": "text",
+                    "text": (
+                        f"Extract all text content from this document '{filename}'. "
+                        "Return only the plain text, preserving paragraphs and structure."
+                    ),
+                },
+            ]
+        elif mimetype.startswith("image/"):
+            encoded = base64.standard_b64encode(data).decode("utf-8")
+            content = [
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": mimetype,
+                        "data": encoded,
+                    },
+                },
+                {
+                    "type": "text",
+                    "text": (
+                        f"Extract all text visible in this image '{filename}'. "
+                        "Return only the plain text."
+                    ),
+                },
+            ]
+        else:
+            return ""
+
+        response = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=2000,
+            messages=[{"role": "user", "content": content}],
+        )
+        return response.content[0].text.strip()
+    except Exception as exc:
+        log.warning(f"Claude vision OCR failed: {exc}")
+        return ""
+
+
+def extract_attachment_text(att: dict) -> tuple[str, str]:
+    """
+    Download an attachment and extract its text content.
+    Returns (ocr_text, ocr_method).
+
+    Chain:
+      1. pdfplumber (text PDFs)
+      2. pytesseract via pdf2image (scanned PDFs) or direct image OCR
+      3. Claude vision API (fallback for both)
+    """
+    url = att.get("url", "")
+    if not url:
+        return "", ""
+
+    mimetype = att.get("mimetype", "")
+    filename = att.get("filename", "file")
+
+    log.info(f"  Downloading attachment: {filename} ({mimetype})")
+    data = _download_attachment(url)
+    if not data:
+        return "", ""
+
+    text = ""
+    method = ""
+
+    if mimetype == "application/pdf":
+        # Step 1: pdfplumber (text-based PDFs)
+        text = _ocr_pdf_pdfplumber(data)
+        if text:
+            method = "pdfplumber"
+            log.info(f"  ✓ pdfplumber extracted {len(text)} chars from {filename}")
+        else:
+            # Step 2: tesseract via pdf2image (scanned PDFs)
+            log.info(f"  pdfplumber found no text, trying tesseract+pdf2image…")
+            text = _ocr_pdf_via_images_tesseract(data)
+            if text:
+                method = "tesseract+pdf2image"
+                log.info(f"  ✓ tesseract extracted {len(text)} chars from {filename}")
+
+    elif mimetype.startswith("image/"):
+        # Step 2: pytesseract directly on image
+        text = _ocr_image_tesseract(data, mimetype)
+        if text:
+            method = "tesseract"
+            log.info(f"  ✓ tesseract extracted {len(text)} chars from {filename}")
+
+    # Step 3: Claude vision fallback
+    if not text and mimetype in ("application/pdf",) or (
+        not text and mimetype.startswith("image/")
+    ):
+        log.info(f"  No text found locally, using Claude vision fallback for {filename}…")
+        text = _ocr_claude_vision(data, mimetype, filename)
+        if text:
+            method = "claude-vision"
+            log.info(f"  ✓ Claude vision extracted {len(text)} chars from {filename}")
+
+    return text, method
+
+
+def process_attachments(posts: list[dict]) -> None:
+    """Download and OCR all attachments in-place, adding ocr_text/ocr_method keys."""
+    for post in posts:
+        for att in post.get("attachments", []):
+            mimetype = att.get("mimetype", "")
+            is_processable = (
+                mimetype == "application/pdf" or mimetype.startswith("image/")
+            )
+            if not is_processable:
+                log.info(f"  Skipping non-PDF/image attachment: {att.get('filename')} ({mimetype})")
+                att["ocr_text"] = None
+                att["ocr_method"] = None
+                continue
+
+            ocr_text, ocr_method = extract_attachment_text(att)
+            att["ocr_text"] = ocr_text or None
+            att["ocr_method"] = ocr_method or None
+
 # ── Summariser ────────────────────────────────────────────────────────────────
 def summarise_posts(posts: list[dict]) -> str:
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
@@ -244,6 +496,10 @@ def summarise_posts(posts: list[dict]) -> str:
             *(
                 [f"Attachments: {', '.join(a['filename'] for a in p['attachments'])}"]
                 if p["attachments"] else []
+            ),
+            *(
+                [f"Attachment content:\n{a['ocr_text']}"
+                 for a in p.get("attachments", []) if a.get("ocr_text")]
             ),
         ])
         for p in posts
@@ -389,6 +645,14 @@ def main():
         conn.close()
         return
 
+    # Download and OCR all attachments
+    log.info("Processing attachments (download + OCR)…")
+    process_attachments(new_posts)
+
+    # Persist full post data + attachments to DB
+    save_posts(new_posts, conn)
+    mark_seen(new_posts, conn)
+
     # AI summary and email are temporarily disabled
     # summary  = summarise_posts(new_posts)
     # date_str = datetime.now().strftime("%A %-d %b")
@@ -403,8 +667,7 @@ def main():
     # )
 
     # send_email(subject, body_text, build_html(summary, new_posts))
-    log.info(f"Skipping AI summary and email (disabled). {len(new_posts)} post(s) fetched.")
-    mark_seen(new_posts, conn)
+    log.info(f"Skipping AI summary and email (disabled). {len(new_posts)} post(s) saved to DB.")
     conn.close()
     log.info("=== Done ===")
 
