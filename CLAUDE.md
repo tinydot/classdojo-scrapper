@@ -37,7 +37,7 @@ posts (
 attachments (
   id INT PK AUTOINCREMENT, post_id TEXT FK,
   filename TEXT, mimetype TEXT, url TEXT, att_type TEXT,
-  ocr_text TEXT, ocr_method TEXT, downloaded_at TEXT
+  local_path TEXT, ocr_text TEXT, ocr_method TEXT, downloaded_at TEXT
 )
 ```
 

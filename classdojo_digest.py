@@ -60,8 +60,9 @@ SMTP_PASSWORD = os.environ["SMTP_PASSWORD"]
 EMAIL_FROM    = os.environ.get("EMAIL_FROM", SMTP_USER)
 EMAIL_TO      = os.environ["EMAIL_TO"]   # comma-separated for multiple recipients
 
-DB_PATH  = Path(os.environ.get("DB_PATH", "classdojo_seen.db"))
-HEADLESS = os.environ.get("HEADLESS", "true").lower() != "false"
+DB_PATH          = Path(os.environ.get("DB_PATH", "classdojo_seen.db"))
+ATTACHMENTS_DIR  = Path(os.environ.get("ATTACHMENTS_DIR", "attachments"))
+HEADLESS         = os.environ.get("HEADLESS", "true").lower() != "false"
 
 # ── Database ──────────────────────────────────────────────────────────────────
 def get_db() -> sqlite3.Connection:
@@ -95,6 +96,7 @@ def get_db() -> sqlite3.Connection:
             mimetype      TEXT,
             url           TEXT,
             att_type      TEXT,
+            local_path    TEXT,
             ocr_text      TEXT,
             ocr_method    TEXT,
             downloaded_at TEXT,
@@ -141,11 +143,11 @@ def save_posts(posts: list[dict], conn: sqlite3.Connection) -> None:
         for att in p.get("attachments", []):
             conn.execute("""
                 INSERT INTO attachments
-                  (post_id, filename, mimetype, url, att_type, ocr_text, ocr_method, downloaded_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                  (post_id, filename, mimetype, url, att_type, local_path, ocr_text, ocr_method, downloaded_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 p["id"], att["filename"], att["mimetype"], att["url"], att["type"],
-                att.get("ocr_text"), att.get("ocr_method"), now,
+                att.get("local_path"), att.get("ocr_text"), att.get("ocr_method"), now,
             ))
     conn.commit()
 
@@ -288,12 +290,15 @@ def fetch_feed(email: str, password: str) -> list[dict]:
     return parse_feed(captured["data"])
 
 # ── OCR / attachment extraction ───────────────────────────────────────────────
-def _download_attachment(url: str) -> bytes | None:
-    """Download attachment bytes from a signed URL."""
+def _download_attachment(url: str, save_path: Path) -> bytes | None:
+    """Download attachment bytes from a signed URL and save a local copy."""
     try:
         resp = requests.get(url, timeout=30)
         resp.raise_for_status()
-        return resp.content
+        data = resp.content
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        save_path.write_bytes(data)
+        return data
     except Exception as exc:
         log.warning(f"Failed to download attachment: {exc}")
         return None
@@ -407,10 +412,10 @@ def _ocr_claude_vision(data: bytes, mimetype: str, filename: str) -> str:
         return ""
 
 
-def extract_attachment_text(att: dict) -> tuple[str, str]:
+def extract_attachment_text(att: dict) -> tuple[str, str, str | None]:
     """
-    Download an attachment and extract its text content.
-    Returns (ocr_text, ocr_method).
+    Download an attachment, save it locally, and extract its text content.
+    Returns (ocr_text, ocr_method, local_path).
 
     Chain:
       1. pdfplumber (text PDFs)
@@ -419,15 +424,20 @@ def extract_attachment_text(att: dict) -> tuple[str, str]:
     """
     url = att.get("url", "")
     if not url:
-        return "", ""
+        return "", "", None
 
     mimetype = att.get("mimetype", "")
     filename = att.get("filename", "file")
 
+    # Build a collision-safe local path: attachments/<post_id>/<filename>
+    post_id = att.get("_post_id", "unknown")
+    save_path = ATTACHMENTS_DIR / post_id / filename
+
     log.info(f"  Downloading attachment: {filename} ({mimetype})")
-    data = _download_attachment(url)
+    data = _download_attachment(url, save_path)
     if not data:
-        return "", ""
+        return "", "", None
+    log.info(f"  Saved to {save_path}")
 
     text = ""
     method = ""
@@ -464,24 +474,27 @@ def extract_attachment_text(att: dict) -> tuple[str, str]:
     #         method = "claude-vision"
     #         log.info(f"  ✓ Claude vision extracted {len(text)} chars from {filename}")
 
-    return text, method
+    return text, method, str(save_path)
 
 
 def process_attachments(posts: list[dict]) -> None:
-    """Download and OCR all attachments in-place, adding ocr_text/ocr_method keys."""
+    """Download and OCR all attachments in-place, adding local_path/ocr_text/ocr_method keys."""
     for post in posts:
         for att in post.get("attachments", []):
+            att["_post_id"] = post["id"]   # used for local directory naming
             mimetype = att.get("mimetype", "")
             is_processable = (
                 mimetype == "application/pdf" or mimetype.startswith("image/")
             )
             if not is_processable:
                 log.info(f"  Skipping non-PDF/image attachment: {att.get('filename')} ({mimetype})")
+                att["local_path"] = None
                 att["ocr_text"] = None
                 att["ocr_method"] = None
                 continue
 
-            ocr_text, ocr_method = extract_attachment_text(att)
+            ocr_text, ocr_method, local_path = extract_attachment_text(att)
+            att["local_path"] = local_path
             att["ocr_text"] = ocr_text or None
             att["ocr_method"] = ocr_method or None
 
