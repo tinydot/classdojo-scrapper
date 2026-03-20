@@ -258,10 +258,15 @@ def fetch_feed(email: str, password: str) -> list[dict]:
             page.click('button[type="submit"]')
 
             log.info("Submitted login, waiting for redirect…")
-            page.wait_for_url(
-                re.compile(r"classdojo\.com/(activity|home|app|logged-in)"),
-                timeout=25_000,
-            )
+            if "data" not in captured:
+                try:
+                    page.wait_for_url(
+                        re.compile(r"classdojo\.com/(activity|home|app|logged-in)"),
+                        timeout=25_000,
+                    )
+                except PlaywrightTimeout:
+                    if "data" not in captured:
+                        raise
             log.info(f"Logged in — at {page.url}")
 
             # If the feed API wasn't triggered on the landing page, navigate to home
