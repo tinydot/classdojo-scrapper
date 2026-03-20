@@ -389,19 +389,21 @@ def main():
         conn.close()
         return
 
-    summary  = summarise_posts(new_posts)
-    date_str = datetime.now().strftime("%A %-d %b")
-    n        = len(new_posts)
-    subject  = f"📚 ClassDojo – {date_str} ({n} new post{'s' if n != 1 else ''})"
+    # AI summary and email are temporarily disabled
+    # summary  = summarise_posts(new_posts)
+    # date_str = datetime.now().strftime("%A %-d %b")
+    # n        = len(new_posts)
+    # subject  = f"📚 ClassDojo – {date_str} ({n} new post{'s' if n != 1 else ''})"
 
-    body_text = (
-        f"ClassDojo Digest – {date_str}\n\n{summary}\n\n"
-        + "\n\n---\n\n".join(
-            f"{p['author']} ({p['time']})\n{p['body']}" for p in new_posts
-        )
-    )
+    # body_text = (
+    #     f"ClassDojo Digest – {date_str}\n\n{summary}\n\n"
+    #     + "\n\n---\n\n".join(
+    #         f"{p['author']} ({p['time']})\n{p['body']}" for p in new_posts
+    #     )
+    # )
 
-    send_email(subject, body_text, build_html(summary, new_posts))
+    # send_email(subject, body_text, build_html(summary, new_posts))
+    log.info(f"Skipping AI summary and email (disabled). {len(new_posts)} post(s) fetched.")
     mark_seen(new_posts, conn)
     conn.close()
     log.info("=== Done ===")
