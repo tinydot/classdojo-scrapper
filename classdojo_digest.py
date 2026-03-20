@@ -18,6 +18,8 @@ Config:
 Cron (daily at 7am):
   0 7 * * * /usr/bin/python3 /path/to/classdojo_digest.py >> /path/to/classdojo.log 2>&1
 """
+import pytesseract
+pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
 import os
 import re
